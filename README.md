@@ -1,1 +1,19 @@
-# piggy-run
+# Piggy Run
+
+An NES-style side-scrolling runner. You play a little pink pig: jump over crates, hay bales, fences, pipes and mud puddles, and grab apples for bonus points.
+
+## Play
+
+Open `index.html` in any modern browser. It's one file with no build step and no dependencies.
+
+| Action | Keyboard | Touch |
+| --- | --- | --- |
+| Jump (hold to go higher) | Space, Up arrow, W | Tap and hold anywhere |
+| Pause | P or Esc | II button |
+| Mute | M | ♪ button |
+
+## Rules
+
+- Hitting an obstacle or landing in mud ends the run.
+- Every 250 m is a new level. Each level scrolls faster, plays the music faster, and moves to the next time of day: Morning Meadow, Sunny Farm, Sunset Hills, Twilight Woods, Starry Night.
+- Score is meters run plus 10 per apple. Your best score is saved in the browser.
