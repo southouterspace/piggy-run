@@ -407,6 +407,57 @@
   const BASS = ('C3 G3 C3 G3 C3 G3 C3 G3 F2 C3 F2 C3 G2 D3 G2 D3 ' +
                 'C3 G3 C3 G3 A2 E3 A2 E3 F2 C3 F2 C3 G2 D3 C3 C3').split(' ');
 
+  // A pig grunt: a buzzy sawtooth that swoops up and down, wobbled for a growl and pushed
+  // through a moving nasal formant ("oi" sliding to "nk"), ending in a tiny click.
+  function playOink(ac, dest, t, vol = 0.3) {
+    const dur = 0.22;
+    const base = 150 + Math.random() * 60;   // each oink a little different
+    const o = ac.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(base * 0.85, t);
+    o.frequency.linearRampToValueAtTime(base * 1.4, t + 0.06);
+    o.frequency.exponentialRampToValueAtTime(base * 0.75, t + dur);
+
+    const lfo = ac.createOscillator(), lfoDepth = ac.createGain();
+    lfo.frequency.value = 34;
+    lfoDepth.gain.value = base * 0.14;
+    lfo.connect(lfoDepth); lfoDepth.connect(o.frequency);
+
+    const nose = ac.createBiquadFilter();
+    nose.type = 'bandpass';
+    nose.Q.value = 3.5;
+    nose.frequency.setValueAtTime(700, t);
+    nose.frequency.linearRampToValueAtTime(1500, t + dur * 0.7);
+    const ring = ac.createBiquadFilter();
+    ring.type = 'peaking';
+    ring.frequency.value = 2400;
+    ring.Q.value = 5;
+    ring.gain.value = 8;
+
+    const env = ac.createGain();
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+    env.gain.setValueAtTime(vol, t + dur * 0.6);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    o.connect(nose); nose.connect(ring); ring.connect(env); env.connect(dest);
+    o.start(t); lfo.start(t);
+    o.stop(t + dur + 0.02); lfo.stop(t + dur + 0.02);
+
+    // The "k".
+    const len = Math.floor(ac.sampleRate * 0.025);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const click = ac.createBufferSource(), clickHp = ac.createBiquadFilter(), clickGain = ac.createGain();
+    click.buffer = buf;
+    clickHp.type = 'highpass';
+    clickHp.frequency.value = 1800;
+    clickGain.gain.value = vol * 0.35;
+    click.connect(clickHp); clickHp.connect(clickGain); clickGain.connect(dest);
+    click.start(t + dur * 0.82);
+  }
+
   const sound = {
     ac: null, master: null, muted: store.get('piggy.muted', false),
     musicOn: false, step: 0, nextTime: 0, bpm: 140, timer: null,
@@ -451,7 +502,7 @@
       src.connect(f); f.connect(g); g.connect(this.master);
       src.start();
     },
-    jump() { this.tone(260, 0.16, { slide: 620, vol: 0.09 }); },
+    oink() { if (this.ac) playOink(this.ac, this.master, this.ac.currentTime + 0.001); },
     apple() {
       if (!this.ac) return;
       const t = this.ac.currentTime;
@@ -524,6 +575,7 @@
   let obstacles = [], pickups = [], particles = [];
   let nextSpawn = 0;
   let banner = null;      // { title, sub, t }
+  let oinks = [];         // "OINK!" pops that ride above the pig's head
   let stateT = 0, shake = 0, clock = 0;
   const pig = { y: GROUND, vy: 0, onGround: true, held: false, buffer: 0, muddy: false, runT: 0, dustT: 0 };
 
@@ -534,7 +586,7 @@
     paused = false;
     level = 1; prevTheme = 0; themeFade = 1;
     speed = speedFor(1); distance = 0; apples = 0; score = 0; newBest = false;
-    obstacles = []; pickups = []; particles = [];
+    obstacles = []; pickups = []; particles = []; oinks = [];
     nextSpawn = W * 0.75;
     Object.assign(pig, { y: GROUND, vy: 0, onGround: true, buffer: 0, muddy: false });
     banner = { title: 'LEVEL 1', sub: THEMES[0].name, t: 0 };
@@ -665,6 +717,8 @@
     if (shake > 0) shake -= dt;
     if (themeFade < 1) themeFade = Math.min(1, themeFade + dt / 1.2);
     if (banner) { banner.t += dt; if (banner.t > 2.6) banner = null; }
+    for (const o of oinks) o.t += dt;
+    oinks = oinks.filter(o => o.t < 0.6);
 
     if (state === 'title') {
       speed = 60 * viewScale();
@@ -735,7 +789,8 @@
       pig.vy = -JUMP_V;
       pig.onGround = false;
       pig.buffer = 0;
-      sound.jump();
+      sound.oink();
+      oinks.push({ t: 0 });
       puff(PIG_X + 8, GROUND, 4, '#f8f0e0');
     }
     if (!pig.onGround) {
@@ -972,6 +1027,11 @@
       ctx.drawImage(APPLE, Math.round(p.x), Math.round(p.y + Math.sin(clock * 5 + p.bob) * 1.5));
     }
     drawPig();
+    for (const o of oinks) {
+      ctx.globalAlpha = Math.min(1, (0.6 - o.t) / 0.25);
+      text('OINK!', PIG_X + 16, Math.round(pig.y - 28 - o.t * 14), 8, '#ffd3e6', 'left', '#4a1430');
+    }
+    ctx.globalAlpha = 1;
     for (const p of particles) {
       ctx.globalAlpha = Math.max(0, Math.min(1, p.life / p.max * 1.5));
       ctx.fillStyle = p.color;
@@ -1100,7 +1160,7 @@
   window.__piggy = {
     get state() { return state; }, get level() { return level; }, get speed() { return speed; },
     get score() { return score; }, get obstacles() { return obstacles; }, get pigX() { return PIG_X; }, pig,
-    setDistance(m) { distance = m * PX_PER_METER; }, press, release,
+    setDistance(m) { distance = m * PX_PER_METER; }, press, release, playOink,
   };
 })();
 </script>

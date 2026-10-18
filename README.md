@@ -14,6 +14,7 @@ Open `index.html` in any modern browser, on a computer or a phone. It's one file
 
 ## Rules
 
+- The pig oinks every time it jumps.
 - Hitting an obstacle or landing in mud ends the run.
 - Every 250 m is a new level. Each level scrolls faster, plays the music faster, and moves to the next time of day: Morning Meadow, Sunny Farm, Sunset Hills, Twilight Woods, Starry Night.
 - Score is meters run plus 10 per apple. Your best score is saved in the browser.
