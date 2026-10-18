@@ -4,7 +4,7 @@ An NES-style side-scrolling runner. You play a little pink pig: jump over crates
 
 ## Play
 
-Open `index.html` in any modern browser. It's one file with no build step and no dependencies.
+Open `index.html` in any modern browser, on a computer or a phone. It's one file with no build step and no dependencies. On phones it fills the screen in either orientation; held upright, the view zooms in and scrolls a little slower so you still have time to react.
 
 | Action | Keyboard | Touch |
 | --- | --- | --- |

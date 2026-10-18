@@ -19,7 +19,7 @@
     --font-pixel: 'Press Start 2P', ui-monospace, Menlo, Consolas, monospace;
     color-scheme: dark;
   }
-  html, body { height: 100%; }
+  html, body { height: 100%; overscroll-behavior: none; }
   body {
     margin: 0;
     background: var(--cabinet);
@@ -30,6 +30,7 @@
     -webkit-user-select: none;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
   }
   #app {
     height: 100%;
@@ -72,6 +73,12 @@
   .controls button:hover { background: #6a2048; }
   .controls button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .controls button[aria-pressed="true"] { opacity: 0.6; }
+  /* Tall screens: obstacles arrive along the ground on the right, so keep buttons in the sky. */
+  #screen.tall .controls { bottom: auto; top: var(--controls-top, 60px); }
+  @media (pointer: coarse) {
+    .controls { right: 8px; bottom: 8px; gap: 10px; }
+    .controls button { font-size: 12px; min-width: 44px; min-height: 44px; padding: 0; }
+  }
 </style>
 </head>
 <body>
@@ -96,26 +103,47 @@
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   const FONT = "'Press Start 2P', ui-monospace, Menlo, Consolas, monospace";
+  const TOUCH = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 
-  const H = 216;               // logical height, NES-ish
-  const GROUND = H - 32;       // y of the ground surface
-  let W = 384;                 // logical width adapts to the window's shape
+  // The play strip is always 216 logical pixels tall (NES-ish). Wide screens show more
+  // road; tall phone screens zoom in and show more sky above the same strip.
+  const BASE_H = 216;
+  let W = 384, H = BASE_H;     // logical size adapts to the window's shape
+  let GROUND = H - 32;         // y of the ground surface
+  let LIFT = 0;                // extra sky above the play strip on tall screens
+  let PIG_X = 52;
   let backing = 3;             // backing-store pixels per logical pixel
+  let onResize = () => {};
 
   function resize() {
     const cs = getComputedStyle(app);
     const availW = app.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 8;
     const availH = app.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
-    W = Math.round(Math.min(432, Math.max(256, H * (availW / availH))));
+    const aspect = availW / availH;
+    const prev = W + 'x' + H;
+    W = Math.round(Math.min(432, Math.max(224, BASE_H * aspect)));
+    H = Math.round(Math.min(380, Math.max(BASE_H, W / aspect)));
+    GROUND = H - 32;
+    LIFT = H - BASE_H;
+    PIG_X = W < 300 ? 36 : 52;
     const cssScale = Math.max(0.5, Math.min(availW / W, availH / H));
-    backing = Math.min(6, Math.max(1, Math.ceil(cssScale * (window.devicePixelRatio || 1))));
+    const dpr = window.devicePixelRatio || 1;
+    // Cap the backing store so big phone screens don't burn fill-rate.
+    const maxBacking = Math.max(1, Math.floor(Math.sqrt(4.5e6 / (W * H))));
+    backing = Math.min(6, maxBacking, Math.max(1, Math.ceil(cssScale * dpr)));
     canvas.width = W * backing;
     canvas.height = H * backing;
     canvas.style.width = Math.floor(W * cssScale) + 'px';
     canvas.style.height = Math.floor(H * cssScale) + 'px';
     ctx.imageSmoothingEnabled = false;
+    const screenEl = document.getElementById('screen');
+    screenEl.classList.toggle('tall', LIFT > 24);
+    screenEl.style.setProperty('--controls-top', Math.round(42 * cssScale) + 'px');
+    if (prev !== W + 'x' + H) onResize();
   }
   window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 250));
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(app);
   resize();
 
   // ---------------------------------------------------------------------------
@@ -363,7 +391,7 @@
   }
 
   const STARS = Array.from({ length: 60 }, () => ({
-    x: Math.random() * 1200, y: Math.random() * (GROUND - 60), p: Math.random() * 6.28,
+    x: Math.random() * 1200, y: Math.random(), p: Math.random() * 6.28,
   }));
 
   // ---------------------------------------------------------------------------
@@ -474,12 +502,15 @@
   const GRAVITY = 1500;
   const JUMP_V = 470;
   const AIRTIME = 2 * JUMP_V / GRAVITY;       // full-jump hang time, seconds
-  const PIG_X = 52;
   const PIG_HIT = { dx: 4, w: 14, h: 11 };    // forgiving hitbox inside the sprite
   const METERS_PER_LEVEL = 250;
   const PX_PER_METER = 16;
 
-  const speedFor = (level) => Math.min(390, 130 + (level - 1) * 24);
+  // Narrow (portrait) views see less road ahead, so they scroll somewhat slower. Not much
+  // slower: jump length shrinks with speed, and below 0.8 a crate stops being clearable.
+  // Distance and score are counted in full-speed meters so they match on every screen.
+  const viewScale = () => Math.max(0.8, Math.min(1, (W - PIG_X) / (384 - 52)));
+  const speedFor = (level) => Math.min(390, 130 + (level - 1) * 24) * viewScale();
   const bpmFor = (level) => Math.min(230, 136 + (level - 1) * 12);
 
   // Horizontal time the pig spends above height h during a full jump.
@@ -509,6 +540,17 @@
     banner = { title: 'LEVEL 1', sub: THEMES[0].name, t: 0 };
     stateT = 0;
     sound.startMusic(bpmFor(1));
+    keepAwake();
+  }
+
+  // Keep the phone screen on while playing; fine if the browser refuses.
+  let wakeLock = null;
+  function keepAwake() {
+    if (wakeLock || !navigator.wakeLock || document.hidden) return;
+    navigator.wakeLock.request('screen').then((l) => {
+      wakeLock = l;
+      l.addEventListener('release', () => { wakeLock = null; });
+    }, () => {});
   }
 
   function rand(a, b) { return a + Math.random() * (b - a); }
@@ -517,8 +559,8 @@
   function makeObstacle(kind, x) {
     switch (kind) {
       case 'mud': {
-        const maxW = Math.max(20, Math.min(64, speed * AIRTIME * 0.62 - PIG_HIT.w));
-        const w = Math.round(rand(18, maxW) / 2) * 2;
+        const maxW = Math.max(16, Math.min(64, speed * AIRTIME * 0.62 - PIG_HIT.w));
+        const w = Math.round(rand(Math.min(18, maxW), maxW) / 2) * 2;
         return { kind, x, w, h: 0, img: mudSprite(w) };
       }
       case 'crate': return { kind, x, w: 16, h: 16, img: CRATE };
@@ -564,7 +606,7 @@
     }
 
     // Leave room to land and jump again, plus some breathing space that shrinks with level.
-    const minGap = speed * (AIRTIME + 0.24) + 18;
+    const minGap = speed * (AIRTIME + 0.24) + 18 * viewScale();
     const extra = rand(0, speed * Math.max(0.55, 1.5 - level * 0.12));
     nextSpawn = span + minGap + extra;
     if (Math.random() < 0.25) {
@@ -607,6 +649,7 @@
     sound.stopMusic();
     const mud = o.kind === 'mud';
     sound.crash(mud);
+    try { navigator.vibrate && navigator.vibrate(mud ? [30, 40, 60] : 70); } catch (e) { /* not allowed */ }
     if (mud) { pig.muddy = true; splat(PIG_X + 12, GROUND - 2); }
     else puff(PIG_X + 18, pig.y - 6, 10, '#ffffff', 60, 60);
     pig.vy = -330;
@@ -624,14 +667,14 @@
     if (banner) { banner.t += dt; if (banner.t > 2.6) banner = null; }
 
     if (state === 'title') {
-      speed = 60;
+      speed = 60 * viewScale();
       scroll += speed * dt;
       runPig(dt, false);
     } else if (state === 'playing') {
       speed += Math.sign(speedFor(level) - speed) * Math.min(Math.abs(speedFor(level) - speed), 45 * dt);
       const dx = speed * dt;
       scroll += dx;
-      distance += dx;
+      distance += dx / viewScale();
 
       const newLevel = 1 + Math.floor(distance / PX_PER_METER / METERS_PER_LEVEL);
       if (newLevel !== level) {
@@ -719,19 +762,41 @@
   // ---------------------------------------------------------------------------
   // Draw
   // ---------------------------------------------------------------------------
+  // Outlined text is rendered once per string into an offscreen canvas at device
+  // resolution, then blitted; redrawing 9 glyph passes every frame is slow on phones.
+  const textCache = new Map();
   function text(str, x, y, size, color, align = 'left', outline = '#1a0a12') {
-    ctx.font = `${size}px ${FONT}`;
-    ctx.textAlign = align;
-    ctx.textBaseline = 'top';
-    if (outline) {
-      ctx.fillStyle = outline;
-      const o = size >= 14 ? 2 : 1;
-      for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o], [o, o], [-o, o], [o, -o], [-o, -o]]) {
-        ctx.fillText(str, x + dx, y + dy);
+    const key = `${str}|${size}|${color}|${outline}|${backing}`;
+    let img = textCache.get(key);
+    if (!img) {
+      if (textCache.size > 300) textCache.clear();
+      const o = outline ? (size >= 14 ? 2 : 1) : 0;
+      const font = `${size * backing}px ${FONT}`;
+      ctx.font = font;
+      const w = Math.ceil(ctx.measureText(str).width / backing) + o * 2 + 1;
+      const h = size + o * 2 + 2;
+      img = newCanvas(w * backing, h * backing);
+      const g = img.getContext('2d');
+      g.font = font;
+      g.textBaseline = 'top';
+      if (outline) {
+        g.fillStyle = outline;
+        for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o], [o, o], [-o, o], [o, -o], [-o, -o]]) {
+          g.fillText(str, (o + dx) * backing, (o + dy) * backing);
+        }
       }
+      g.fillStyle = color;
+      g.fillText(str, o * backing, o * backing);
+      img.lw = w; img.lh = h; img.o = o;
+      textCache.set(key, img);
     }
-    ctx.fillStyle = color;
-    ctx.fillText(str, x, y);
+    const left = align === 'center' ? x - (img.lw - img.o * 2 - 1) / 2 : align === 'right' ? x - (img.lw - img.o * 2 - 1) : x;
+    ctx.drawImage(img, Math.round(left) - img.o, y - img.o, img.lw, img.lh);
+  }
+  // Fallback-font renders must not outlive the web font arriving.
+  if (document.fonts) {
+    document.fonts.load(`8px ${FONT}`).then(() => textCache.clear(), () => {});
+    document.fonts.addEventListener && document.fonts.addEventListener('loadingdone', () => textCache.clear());
   }
 
   function tile(img, period, offset, y, startAt = 0) {
@@ -750,14 +815,15 @@
         const x = ((s.x - scroll * 0.02) % 1200 + 1200) % 1200;
         if (x > W) continue;
         ctx.fillStyle = Math.sin(clock * 3 + s.p) > 0.6 ? '#ffffff' : '#9098c8';
-        ctx.fillRect(Math.round(x), Math.round(s.y), 1, 1);
+        ctx.fillRect(Math.round(x), Math.round(s.y * (GROUND - 60)), 1, 1);
       }
     }
-    if (art.orb) ctx.drawImage(art.orb, W - 74, t.sun ? 70 : 22);
+    if (art.orb) ctx.drawImage(art.orb, W - 74 + Math.max(0, 300 - W) * 0.15, (t.sun ? 70 : 22) + LIFT * 0.5);
 
     // Clouds drift slowly on their own as well as with the scroll.
     const cloudOff = scroll * 0.12 + clock * 4;
-    [[0, 28], [150, 52], [270, 18]].forEach(([dx, y]) => tile(art.cloud, 360, cloudOff - dx, y));
+    [[0, 28], [150, 52], [270, 18]].forEach(([dx, y]) => tile(art.cloud, 360, cloudOff - dx, y + LIFT * 0.6));
+    if (LIFT > 60) [[80, 30], [230, 70]].forEach(([dx, y]) => tile(art.cloud, 360, cloudOff * 0.7 - dx, y));
 
     tile(art.bigHill, 340, scroll * 0.25, GROUND - 52);
     tile(art.smallHill, 340, scroll * 0.25 - 170, GROUND - 28);
@@ -835,9 +901,9 @@
     ctx.drawImage(APPLE, pad, pad + 22);
     text('x' + apples, pad + 11, pad + 23, 8, '#fff2f7');
 
-    text('LEVEL ' + level, W / 2, pad, 8, '#ffd3e6', 'center');
+    text(W < 260 ? 'LV ' + level : 'LEVEL ' + level, W / 2, pad, 8, '#ffd3e6', 'center');
     const progress = (distance / PX_PER_METER % METERS_PER_LEVEL) / METERS_PER_LEVEL;
-    const bw = 64, bx = Math.round(W / 2 - bw / 2), by = pad + 12;
+    const bw = W < 260 ? 44 : 64, bx = Math.round(W / 2 - bw / 2), by = pad + 12;
     ctx.fillStyle = '#1a0a12'; ctx.fillRect(bx - 1, by - 1, bw + 2, 6);
     ctx.fillStyle = '#5a2a44'; ctx.fillRect(bx, by, bw, 4);
     ctx.fillStyle = '#ff9ec4'; ctx.fillRect(bx, by, Math.round(bw * progress), 4);
@@ -857,22 +923,26 @@
 
   function drawTitle() {
     const bounce = Math.round(Math.sin(clock * 3) * 3);
-    text('PIGGY', W / 2, 44 + bounce, 24, '#ff9ec4', 'center');
-    text('RUN!', W / 2, 74 + bounce, 24, '#ffd3e6', 'center');
-    if (Math.floor(clock * 2) % 2 === 0) text('TAP OR PRESS SPACE', W / 2, 116, 8, '#ffffff', 'center');
-    text('HOLD TO JUMP HIGHER', W / 2, 130, 8, '#ffe8a0', 'center');
-    if (best > 0) text('HI ' + String(best).padStart(6, '0'), W / 2, 146, 8, '#ffffff', 'center');
+    const y0 = Math.round(LIFT * 0.55);
+    text('PIGGY', W / 2, y0 + 44 + bounce, 24, '#ff9ec4', 'center');
+    text('RUN!', W / 2, y0 + 74 + bounce, 24, '#ffd3e6', 'center');
+    if (Math.floor(clock * 2) % 2 === 0) {
+      text(TOUCH ? 'TAP TO START' : 'TAP OR PRESS SPACE', W / 2, y0 + 116, 8, '#ffffff', 'center');
+    }
+    text(TOUCH ? 'TAP TO JUMP' : 'HOLD TO JUMP HIGHER', W / 2, y0 + 130, 8, '#ffe8a0', 'center');
+    if (TOUCH) text('HOLD FOR A BIG JUMP', W / 2, y0 + 142, 8, '#ffe8a0', 'center');
+    if (best > 0) text('HI ' + String(best).padStart(6, '0'), W / 2, y0 + (TOUCH ? 158 : 146), 8, '#ffffff', 'center');
   }
 
   function drawGameOver() {
-    const { y } = drawPanel(196, 104);
+    const { y } = drawPanel(Math.min(196, W - 12), 104);
     text('GAME OVER', W / 2, y + 12, 16, '#ff9ec4', 'center');
     text('SCORE  ' + String(score).padStart(6, '0'), W / 2, y + 38, 8, '#ffffff', 'center', null);
     text('BEST   ' + String(best).padStart(6, '0'), W / 2, y + 52, 8, '#ffffff', 'center', null);
-    text('LEVEL ' + level + '   APPLES ' + apples, W / 2, y + 66, 8, '#ffd3e6', 'center', null);
-    if (newBest && Math.floor(clock * 4) % 2 === 0) text('NEW BEST!', W / 2, y - 18, 8, '#ffe060', 'center');
+    text('LEVEL ' + level + (W < 240 ? '  ' : '   ') + 'APPLES ' + apples, W / 2, y + 66, 8, '#ffd3e6', 'center', null);
+    if (newBest && Math.floor(clock * 4) % 2 === 0) text('NEW BEST!', W / 2, y - 14, 8, '#ffe060', 'center');
     if (stateT > 0.7) {
-      text('TAP TO PLAY AGAIN', W / 2, y + 86, 8, '#ffe8a0', 'center', null);
+      text(W < 240 ? 'TAP TO RETRY' : 'TAP TO PLAY AGAIN', W / 2, y + 86, 8, '#ffe8a0', 'center', null);
     }
   }
 
@@ -880,9 +950,11 @@
     if (!banner) return;
     const t = banner.t;
     const slide = t < 0.3 ? (1 - t / 0.3) : (t > 2.3 ? (t - 2.3) / 0.3 : 0);
-    const y = Math.round(60 - slide * 80);
+    const y = Math.round(60 + LIFT * 0.55 - slide * 12);
+    ctx.globalAlpha = 1 - slide;
     text(banner.title, W / 2, y, 16, '#ffffff', 'center');
     text(banner.sub, W / 2, y + 22, 8, '#ffe060', 'center');
+    ctx.globalAlpha = 1;
   }
 
   function draw() {
@@ -960,6 +1032,9 @@
   }
   function release() { pig.held = false; }
 
+  // Track every finger so lifting one while another still holds keeps the big jump.
+  const fingers = new Set();
+
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') {
       e.preventDefault();
@@ -977,18 +1052,32 @@
   app.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
     e.preventDefault();
-    press();
+    const wasHolding = fingers.size > 0;
+    fingers.add(e.pointerId);
+    if (!wasHolding) press();
   });
-  window.addEventListener('pointerup', release);
-  window.addEventListener('pointercancel', release);
+  const lift = (e) => {
+    // Touch browsers (iOS especially) only allow audio to start on finger-up.
+    sound.unlock();
+    fingers.delete(e.pointerId);
+    if (fingers.size === 0) release();
+  };
+  window.addEventListener('pointerup', lift);
+  window.addEventListener('pointercancel', lift);
   app.addEventListener('touchstart', (e) => { if (!e.target.closest('button')) e.preventDefault(); }, { passive: false });
+  app.addEventListener('touchend', () => sound.unlock());
   app.addEventListener('contextmenu', (e) => e.preventDefault());
 
   for (const b of [pauseBtn, muteBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
   pauseBtn.addEventListener('click', (e) => { e.currentTarget.blur(); sound.unlock(); setPaused(!paused); });
   muteBtn.addEventListener('click', (e) => { e.currentTarget.blur(); sound.unlock(); sound.setMuted(!sound.muted); syncMute(); });
 
-  document.addEventListener('visibilitychange', () => { if (document.hidden) setPaused(true); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) setPaused(true);
+    else if (state === 'playing') keepAwake();
+  });
+  // Rotating mid-run changes the view and speed; pause so the player can settle in.
+  onResize = () => { if (state === 'playing') setPaused(true); };
   window.addEventListener('blur', () => setPaused(true));
 
   // ---------------------------------------------------------------------------
@@ -1010,7 +1099,7 @@
   // Test hook for automated checks.
   window.__piggy = {
     get state() { return state; }, get level() { return level; }, get speed() { return speed; },
-    get score() { return score; }, get obstacles() { return obstacles; }, pig,
+    get score() { return score; }, get obstacles() { return obstacles; }, get pigX() { return PIG_X; }, pig,
     setDistance(m) { distance = m * PX_PER_METER; }, press, release,
   };
 })();
